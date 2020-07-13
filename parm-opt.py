@@ -5,6 +5,8 @@ import matplotlib.pyplot as plt
 import sys
 import math
 from scipy.optimize import leastsq
+import dask
+from dask.distributed import Client,LocalCluster
 
 method_dict = {'PM3':-7,'AM1':-2, 'RM1':-2, 'OM1':-5, 'OM2':-6, 'OM3':-8,'ODM2':-22, 'ODM3':-23,'XTB':-14}
             
@@ -52,6 +54,8 @@ def read_input(file):
         lines = f_in.readlines() 
     n_parms= int(lines[0].split()[0])
     method = lines[1].split()[0]
+    num_workers = 4
+    if lines[1].split()[1].isdigit() : num_workers = int(lines[1].split()[1])
     method_num = method_dict[method.upper().replace("ORTHO", "")]
     n_molec = int(lines[2].split()[0])
     n_atoms=[]
@@ -65,7 +69,6 @@ def read_input(file):
     coords=[[] for x in range(n_molec)]
     geoms=[[] for x in range(n_molec)]
     weights=[[] for x in range(n_molec)]
-    
     
     n = 3
     for mol in range(n_molec):
@@ -92,7 +95,7 @@ def read_input(file):
             weights[mol].append(lines[n+1+weight].split())
         n += n_weights[mol]+1
         
-    return method_num, n_molec, n_atoms, charge, structures, energy_files, structure_files, at_num, coords, n_geoms, geoms, n_weights, weights
+    return method_num, n_molec, n_atoms, charge, structures, energy_files, structure_files, at_num, coords, n_geoms, geoms, n_weights, weights, num_workers
 
 def run_mndo(mol_num):
     os.system(f'mndo99 < mol{mol_num}.inp > mol{mol_num}.out')
@@ -148,8 +151,7 @@ def comp_geoms(n_molec):
                 diff2 = angle1-angle2
                 return_geoms.append(diff2)
                 print(f'{at_ang} {angle1:.4} {angle2:.4} {diff2:.4}')
-    return np.array(return_geoms)
-                
+    return np.array(return_geoms)       
 
 def read_energies(n_molec):  
     energies=[]
@@ -174,8 +176,9 @@ def read_abinito(energy_files):
         energies = np.hstack((energies,((np.array(energy)-np.min(energy)))))
     return np.array(energies)
 
-def calc_fvec(structures, weights, n_geoms, geoms,method):
+def calc_fvec(structures, weights, n_geoms, geoms, method):
     if method == -14:
+        r = 1+1
         #xtb
     else:
         for mol in range(n_molec):
@@ -221,7 +224,7 @@ def write_parms(X):
 
 def big_loop(X,method):
     write_parms(X)  # Write the current set of parameters to fort.14
-    fvec, energies = calc_fvec(structures, weights, n_geoms, geoms,method)
+    fvec, energies = calc_fvec(structures, weights, n_geoms, geoms, method)
     # if np.sum(n_geoms) > 0:
         # print  ('rmsd  ' + str(np.sqrt(np.mean(np.square(fvec[0:-np.sum(n_geoms)])))))
     #else:
@@ -238,7 +241,7 @@ def zero_energy(endData):
     energies -= np.min(energies)
     return energies
 
-def anp_int_spec(energies,n_atoms,at_num,input_file):
+def anp_int_spec(energies,n_atoms,at_num):
     
     energies = zero_energy(energies)
     iterData = iter(energies) 
@@ -251,7 +254,8 @@ def anp_int_spec(energies,n_atoms,at_num,input_file):
     dispDat          = "../disp.dat"
     fileName = "freq_files"
    
-    os.mkdir(fileName)
+    if not os.path.isdir(fileName):
+        os.mkdir(fileName)
     os.chdir(fileName)
     
     anpassInput = open("xtb-Anpass","w")
@@ -319,7 +323,7 @@ def anp_int_spec(energies,n_atoms,at_num,input_file):
         end_file.write(f"{float(numbers[0]):18.10f}{float(numbers[1]):19.10f}{float(numbers[2]):19.10f}\n")
     end_file.write(header[w+n_atoms])
 
-    os.system("/home/freu9584/c-c4/sort_fort.sh")
+    os.system("../../../sort_fort.sh")
 
     with open("sorted_fort.9903","r") as symmetryFile:
         symmetry = symmetryFile.readlines()
@@ -328,7 +332,7 @@ def anp_int_spec(energies,n_atoms,at_num,input_file):
     for line in symmetry[:]: 
         if begin == True:
             tempLine = line.split()
-            if not(columnCounter == 4) and not(tempLine[columnCounter]=="0"):
+            if not(columnCounter == deriv) and not(tempLine[columnCounter]=="0"):
                 columnCounter+=1
                 end_file.write(f"    0\n")
             end_file.write(line)
@@ -365,13 +369,14 @@ def anp_int_spec(energies,n_atoms,at_num,input_file):
     os.system("/home/freu9584/bin/spectro.e <SpectroFile> Spectro.out")
     os.chdir("..")
 
-def xtb_method(n_atoms, charge, structures, structure_file, at_nums, template):
+def xtb_method(n_atoms, charge, structures, structure_file, at_nums):
     
     input_path = "xtb_files"
     os.system(f"mkdir {input_path}") #making inputs folder
     moleculeName = os.getcwd().split("/")[-2]
+    all_files = []
     
-    with open(os.path.join(moleculeName,structure_file),"r") as geomfile:
+    with open(os.path.join(structure_file),"r") as geomfile:
         lines = geomfile.readlines()
     padding_zeros = len(str(structures)) # calculate the number of padding zeroes needed from the number of molecules
     first =1
@@ -380,6 +385,7 @@ def xtb_method(n_atoms, charge, structures, structure_file, at_nums, template):
     for mol in range(structures):
         current_file = open(os.path.join(input_path,f"{moleculeName}-coord{mol:0{padding_zeros}}.dat"),"w") 
         # formatted strings allow for added variables in the string. 
+        all_files.append(os.path.join(input_path,f"{moleculeName}-coord{mol:0{padding_zeros}}.dat"))
         atom_count = -1
         current_file.write("$coord\n")
         for line in lines[first:last]:
@@ -390,32 +396,41 @@ def xtb_method(n_atoms, charge, structures, structure_file, at_nums, template):
         first = last+1
         last = first+n_atoms
         current_file.close()
-    
-    endData = []
-    os.system(f"echo {charge} > .CHRG")# specifying the charge of the molecule before running xtb
-    for mol in range(structures):
-        in_file = os.path.join(input_path,f"{moleculeName}-coord{mol:0{padding_zeros}}.dat")
-        output_name = os.path.join(input_path,'output')
-        os.system(f"xtb {in_file} > {output_name}")
-        with open(output_name,"r") as output:
-            out_lines = output.readlines()
+    os.system(f"echo {charge} > .CHRG")# specifying the charge of the molecule
+    return all_files
+
+def xtb_run(w):
+    energy = 0
+    output = w.split(".")[0]+'_output'
+    outputName = os.path.join(os.getcwd(),output)
+    os.system(f"xtb {w} > {outputName}")
+    with open(outputName,"r") as output:
+        out_lines = output.readlines()
         for line in out_lines:
             if ("TOTAL ENERGY" in line):
-                endData.append(float(line.split()[3]))
-    return endData
+                energy = (float(line.split()[3]))
+    return energy
 
 def clear_files():
     os.system('rm mol* fort* opt*')   
 
 energies = []
+method_num, n_molec, n_atoms, charge, structures, energy_files, structure_files, at_num, coords, n_geoms, geoms, n_weights, weights, num_workers = read_input('main.inp')
+sturcture_files = np.array(structure_files)
+abinitio_energies = read_abinito(energy_files)
 
 if method_num == -14:
+    cluster = LocalCluster(n_workers=num_workers, threads_per_worker=1,memory_limit="1GB")
+    client = Client(cluster)
     for mol in range(n_molec):
-        energies.append(xtb_method(n_atoms[mol], charge[mol], structures[mol], structure_files[mol][0],at_num[mol]))
+        lazy_results = []
+        files = xtb_method(n_atoms[mol],charge[mol],structures[mol],structure_files[mol][0],at_num[mol])
+        for file in files:
+            lazy_result = dask.delayed(xtb_run)(file)
+            lazy_results.append(lazy_result)
+
+        energies.append(dask.compute(*lazy_results))  # trigger computation in the background
 else:
-    method_num, n_molec, n_atoms, charge, structures, energy_files, structure_files, at_num, coords, n_geoms, geoms, n_weights, weights = read_input('main.inp')
-    sturcture_files = np.array(structure_files)
-    abinitio_energies = read_abinito(energy_files)
     parm_labels, parm_vals = read_parms(sys.argv[1])
     for mol in range(n_molec):
         write_input(structure_files[mol],
@@ -424,8 +439,8 @@ else:
                     method_num, mol, charge[mol])
                                                  
     x, flag = leastsq(big_loop, parm_vals,epsfcn=1e-4)
-    big_loop(x)
-    fvec, energies = calc_fvec(structures, weights, n_geoms, geoms)
+    big_loop(x,method_num)
+    fvec, energies = calc_fvec(structures, weights, n_geoms, geoms, method_num)
     if np.sum(n_geoms) > 0:
         print  ('FINAL RMSD ' + str(np.sqrt(np.mean(np.square(fvec[0:-np.sum(n_geoms)])))))
     else:
@@ -433,8 +448,10 @@ else:
     plt.plot(energies)
     plt.plot(abinitio_energies)
     plt.savefig('test.png', dpi=300)
+    energies = np.array(map(ev_to_hartrees(),energies))
 
 for n, energy in enumerate(energies):
     anp_int_spec(energy,n_atoms[n],at_num[n])
+client.close()
 
 #main()
