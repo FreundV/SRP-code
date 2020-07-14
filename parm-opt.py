@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import sys
 import math
 from scipy.optimize import leastsq
-import dask
+import dask.distributed
 from dask.distributed import Client,LocalCluster
 
 method_dict = {'PM3':-7,'AM1':-2, 'RM1':-2, 'OM1':-5, 'OM2':-6, 'OM3':-8,'ODM2':-22, 'ODM3':-23,'XTB':-14}
@@ -449,9 +449,9 @@ else:
     plt.plot(abinitio_energies)
     plt.savefig('test.png', dpi=300)
     energies = np.array(map(ev_to_hartrees(),energies))
-
+client.close()
 for n, energy in enumerate(energies):
     anp_int_spec(energy,n_atoms[n],at_num[n])
-client.close()
+
 
 #main()
