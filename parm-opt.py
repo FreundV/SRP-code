@@ -4,6 +4,7 @@ import os
 import matplotlib.pyplot as plt
 import sys
 import math
+import yaml
 from scipy.optimize import leastsq
 import dask.distributed
 from dask.distributed import Client,LocalCluster
@@ -420,8 +421,8 @@ sturcture_files = np.array(structure_files)
 abinitio_energies = read_abinito(energy_files)
 
 if method_num == -14:
-    cluster = LocalCluster(n_workers=num_workers, threads_per_worker=1,memory_limit="1GB")
-    client = Client(cluster)
+    #cluster = LocalCluster(n_workers=num_workers, threads_per_worker=1,memory_limit="1GB")
+    client = Client(n_workers=num_workers, threads_per_worker=1,memory_limit="1GB",processes=False)
     for mol in range(n_molec):
         lazy_results = []
         files = xtb_method(n_atoms[mol],charge[mol],structures[mol],structure_files[mol][0],at_num[mol])
@@ -430,6 +431,7 @@ if method_num == -14:
             lazy_results.append(lazy_result)
 
         energies.append(dask.compute(*lazy_results))  # trigger computation in the background
+    client.close()
 else:
     parm_labels, parm_vals = read_parms(sys.argv[1])
     for mol in range(n_molec):
@@ -449,7 +451,6 @@ else:
     plt.plot(abinitio_energies)
     plt.savefig('test.png', dpi=300)
     energies = np.array(map(ev_to_hartrees(),energies))
-client.close()
 for n, energy in enumerate(energies):
     anp_int_spec(energy,n_atoms[n],at_num[n])
 
