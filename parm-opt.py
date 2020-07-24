@@ -8,6 +8,7 @@ import yaml
 from scipy.optimize import leastsq
 import dask.distributed
 from dask.distributed import Client,LocalCluster
+os.system("xtb -P 1")
 
 method_dict = {'PM3':-7,'AM1':-2, 'RM1':-2, 'OM1':-5, 'OM2':-6, 'OM3':-8,'ODM2':-22, 'ODM3':-23,'XTB':-14}
             
@@ -152,7 +153,25 @@ def comp_geoms(n_molec):
                 diff2 = angle1-angle2
                 return_geoms.append(diff2)
                 print(f'{at_ang} {angle1:.4} {angle2:.4} {diff2:.4}')
-    return np.array(return_geoms)       
+    return np.array(return_geoms) 
+
+def xtb_geoms(n_molec):
+    opt_geom = []
+    for molecule in range(n_molec):
+        file = open("opt_geom.dat","w")
+        file.write(f"$coord\n")
+        for atom in range(n_atoms[molecule]):
+            file.write(f"{coords[molecule][atom][0]:17.14}{coords[molecule][atom][1]:17.14}{coords[molecule][atom][2]:17.14}      {at_sym_dict[at_num[molecule][atom]]}\n")
+        file.write("$end\n")
+        file.close()
+        os.system("/share/apps/xtb-6.3.2/bin/xtb opt_geom.dat --opt normal")
+        with open("xtbopt.dat","r") as opt:
+            optLines = opt.readlines()
+        for atom in range(n_atoms[molecule]):
+            opt_geom.append(float(optLines[atom+1].split()[0])-float(coords[molecule][atom][0]))
+            opt_geom.append(float(optLines[atom+1].split()[1])-float(coords[molecule][atom][1]))
+            opt_geom.append(float(optLines[atom+1].split()[2])-float(coords[molecule][atom][2]))
+    return opt_geom
 
 def read_energies(n_molec):  
     energies=[]
@@ -177,13 +196,51 @@ def read_abinito(energy_files):
         energies = np.hstack((energies,((np.array(energy)-np.min(energy)))))
     return np.array(energies)
 
-def calc_fvec(structures, weights, n_geoms, geoms, method):
-    if method == -14:
-        r = 1+1
-        #xtb
+def read_temp_abinito(energy_files):  
+    energies=[]
+    for file in energy_files:
+        energy = []
+        with open(file) as f:
+            data = f.readlines()
+        for line in data:
+            energy.append(float(line.split()[0]))
+        energies.append(energy)
+    return energies
+
+def calc_fvec(structures, weights, n_geoms, geoms, method, n_atom, atom_num):
+    if method == -14: #xtb method until line 16
+        energies = []
+        fvec2 = []
+        for mol in range(n_molec):
+            lazy_results = []
+            files = xtb_method(n_atoms[mol],charge[mol],structures[mol],structure_files[mol][0],at_num[mol])
+            for file in files:
+                lazy_result = dask.delayed(xtb_run)(file)
+                lazy_results.append(lazy_result)
+
+            energies.append(dask.compute(*lazy_results))  # trigger computation in the background
+        for mol in range(n_molec):
+            anp_int_spec(energies[mol],n_atoms[mol],atom_num[mol])
+            spectro_one = get_Spectro()
+            anp_int_spec(read_temp_abinito(energy_files)[mol],n_atoms[mol],atom_num[mol])
+            spectro_two = get_Spectro()
+            fvec2 = spectro_one-spectro_two
+        energies = zero_energy(energies)
+        fvec= energies-abinitio_energies
+        fvec = fvec[0]
     else:
+        fvec2 = []
         for mol in range(n_molec):
             run_mndo(mol)
+        energies = read_energies(n_molec)
+        fvec = (energies-abinitio_energies)*627.51*349.75
+        for mol in range(n_molec):
+            anp_int_spec(ev_to_hartree(energies[mol]),n_atoms[mol],atom_num[mol])
+            spectro_one = getSpectro()
+            anp_int_spec(read_temp_abinito(energy_files)[mol],n_atoms[mol],atom_num[mol])
+            spectro_two = get_Spectro()
+            fvec2 = spectro_one-spectro_two 
+            
     w = np.ones(np.sum(structures+n_geoms)) 
     s = 0
     for mol in range(n_molec):
@@ -198,12 +255,14 @@ def calc_fvec(structures, weights, n_geoms, geoms, method):
     for mol in range(n_molec):
         for geom in geoms[mol]:
             w[s] = w[s]*int(geom[-1])
-            s += 1      
-    energies = read_energies(n_molec)
-    fvec = (energies-abinitio_energies)*627.51*349.75
-    fvec = np.hstack((fvec,comp_geoms(n_molec)))
+            s += 1
+    if method == -14:
+        fvec = np.hstack((fvec,xtb_geoms(n_molec),fvec2))
+    else:
+        fvec = np.hstack((fvec,comp_geoms(n_molec),fvec2))
     print  ('rmsd  ' + str(np.sqrt(np.mean(np.square(fvec)))))
-    fvec = fvec*w
+    rmsd.append(str(np.sqrt(np.mean(np.square(fvec)))))
+    fvec = fvec[:233]*w
     return fvec, energies
 
 def read_parms(file):
@@ -218,10 +277,13 @@ def read_parms(file):
         parm_vals.append(float(line.split()[2]))
     return parm_labels, parm_vals
 
-def write_parms(X):
-    with open('fort.14','w') as f:
-        for i,line in enumerate(parm_labels):
-            f.write(line[0]+'   '+line[1]+ ' ' +str(X[i])+'\n')
+def write_parms(X,method):
+    if method == -14:
+        xtb_write_parms(X)
+    else:
+        with open('fort.14','w') as f:
+            for i,line in enumerate(parm_labels):
+                f.write(line[0]+'   '+line[1]+ ' ' +str(X[i])+'\n')
 
 def big_loop(X,method):
     write_parms(X)  # Write the current set of parameters to fort.14
@@ -254,7 +316,7 @@ def anp_int_spec(energies,n_atoms,at_num):
     spectro_template = "../spectro.in"
     dispDat          = "../disp.dat"
     fileName = "freq_files"
-   
+    
     if not os.path.isdir(fileName):
         os.mkdir(fileName)
     os.chdir(fileName)
@@ -375,7 +437,7 @@ def xtb_method(n_atoms, charge, structures, structure_file, at_nums):
     input_path = "xtb_files"
     os.system(f"mkdir {input_path}") #making inputs folder
     moleculeName = os.getcwd().split("/")[-2]
-    all_files = []
+    all_files =[]
     
     with open(os.path.join(structure_file),"r") as geomfile:
         lines = geomfile.readlines()
@@ -387,6 +449,7 @@ def xtb_method(n_atoms, charge, structures, structure_file, at_nums):
         current_file = open(os.path.join(input_path,f"{moleculeName}-coord{mol:0{padding_zeros}}.dat"),"w") 
         # formatted strings allow for added variables in the string. 
         all_files.append(os.path.join(input_path,f"{moleculeName}-coord{mol:0{padding_zeros}}.dat"))
+        
         atom_count = -1
         current_file.write("$coord\n")
         for line in lines[first:last]:
@@ -397,6 +460,7 @@ def xtb_method(n_atoms, charge, structures, structure_file, at_nums):
         first = last+1
         last = first+n_atoms
         current_file.close()
+        
     os.system(f"echo {charge} > .CHRG")# specifying the charge of the molecule
     return all_files
 
@@ -404,7 +468,7 @@ def xtb_run(w):
     energy = 0
     output = w.split(".")[0]+'_output'
     outputName = os.path.join(os.getcwd(),output)
-    os.system(f"xtb {w} > {outputName}")
+    os.system(f"/share/apps/xtb-6.3.2/bin/xtb {w} > {outputName}")
     with open(outputName,"r") as output:
         out_lines = output.readlines()
         for line in out_lines:
@@ -413,46 +477,113 @@ def xtb_run(w):
     return energy
 
 def clear_files():
-    os.system('rm mol* fort* opt*')   
+    os.system('rm mol* fort* opt*')  
+    
+def get_Spectro(spectro_file = "freq_files/Spectro.out"):
+    r_equil = []
+    r_alpha = []
+    r_G =[]
+    fundamental = []
+    first = True
+    BXS = 0
+    BYS = 0
+    BZS = 0
+    result = np.array([])
+    with open(spectro_file,"r") as spectro:
+        lines = spectro.readlines()
+    bond_bend = int(lines[14].split()[-1])+int(lines[15].split()[-1])
+    for f,line in enumerate(lines):
+        if "VIBRATIONALLY AVERAGED COORDINATES" in line:
+            for r in range(bond_bend):
+                r_equil.append(float(lines[f+13+r].split()[2]))
+                r_G.append(float(lines[f+13+r].split()[3]))
+                r_alpha.append(float(lines[f+13+r].split()[4]))
+        if "FUNDAMENTAL" in line:
+            t=0
+            while len(fundamental) < bond_bend:
+                if not len(lines[f+t].split())==0 :
+                    if lines[f+t].split()[-1][-1].isdigit():
+                        fundamental.append(float(lines[f+t].split()[-2]))
+                t+=1
+        if "BXS" in line and first:
+            first = False
+            BXS = float(lines[f+1].split()[0])
+            BYS = float(lines[f+1].split()[1])
+            BZS = float(lines[f+1].split()[2])
+    result = np.hstack([r_equil,r_alpha,r_G,fundamental,BXS,BYS,BZS])
+    return result
 
-energies = []
-method_num, n_molec, n_atoms, charge, structures, energy_files, structure_files, at_num, coords, n_geoms, geoms, n_weights, weights, num_workers = read_input('main.inp')
-sturcture_files = np.array(structure_files)
-abinitio_energies = read_abinito(energy_files)
+def xtb_write_parms(new_parms):
+    parmIter = iter(new_parms)
+    count =1
+    global_parms = ["ks","kp","kd","ksd","kpd","kdiff","enscale","ipeashift","gam3s","gam3p","gam3d1",
+                            "gam3d2","aesshift","aesexp","aesrmax","alphaj","a1","a2","s8","s9","aesdmp3",
+                            "aesdmp5","kexp","kexplight"]
+    element_parms = ["lev=","exp=","GAM=","GAM3=","KCNS=","KCNP=","DPOL=","QPOL=","REPA=","REPB=","POLYS=",
+                               "POLYP=","LPARP=","LPARD="]
+    with open("param_gfn2-xtb.txt","r") as parm:
+        parmlines = parm.readlines()
+    new_file = open("2param_gfn2-xtb.txt","w")
+    for line in parmlines[:5]:
+        new_file.write(line)
+    for param in global_parms:
+        new_file.write(f"{param.ljust(12)}   {float(next(parmIter)):10.6f}\n")
+    new_file.write("$end\n$pairpar\n$end\n")
+    for line in parmlines[len(global_parms)+8:]:
+        if line.split()[0] in element_parms:
+            new_file.write(f" {line.split()[0].ljust(6)}")
+            if line.split()[0] == "lev=" or line.split()[0] == "exp=":
+                if count <= 2:
+                    new_file.write(f" {float(next(parmIter)):10.6f}\n")
+                    count = count +1
+                else:
+                    new_file.write(f" {float(next(parmIter)):10.6f}  {float(next(parmIter)):10.6f}\n")
+            else: new_file.write(f" {float(next(parmIter)):10.6f}\n")
+        else: new_file.write(line)
+    new_file.close()
+    
+def xtb_read_parms():
+    count =0
+    with open("param_gfn2-xtb.txt","r") as parm_file:
+        lines = parm_file.readlines()
+    parm_list =[]
+    for line in lines[5:]:
+        if not "$" in line and not line.strip()[0:3] == "ao=":
+            parm_list.append(float(line.split()[1]))
+            if "exp=" in line or "lev=" in line:
+                count +=1
+                if count >2:
+                    parm_list.append(float(line.split()[2]))
+    return parm_list
 
-if method_num == -14:
-    #cluster = LocalCluster(n_workers=num_workers, threads_per_worker=1,memory_limit="1GB")
-    client = Client(n_workers=num_workers, threads_per_worker=1,memory_limit="1GB",processes=False)
-    for mol in range(n_molec):
-        lazy_results = []
-        files = xtb_method(n_atoms[mol],charge[mol],structures[mol],structure_files[mol][0],at_num[mol])
-        for file in files:
-            lazy_result = dask.delayed(xtb_run)(file)
-            lazy_results.append(lazy_result)
 
-        energies.append(dask.compute(*lazy_results))  # trigger computation in the background
-    client.close()
-else:
-    parm_labels, parm_vals = read_parms(sys.argv[1])
-    for mol in range(n_molec):
-        write_input(structure_files[mol],
-                    structures[mol],
-                    n_atoms[mol],at_num[mol],
-                    method_num, mol, charge[mol])
-                                                 
-    x, flag = leastsq(big_loop, parm_vals,epsfcn=1e-4)
+
+if __name__ == "__main__" :
+    rmsd =[]
+    method_num, n_molec, n_atoms, charge, structures, energy_files, structure_files, at_num, coords, n_geoms, geoms, n_weights, weights, num_workers = read_input('main.inp')
+    cluster = LocalCluster(n_workers=num_workers, threads_per_worker=1,memory_limit="1GB",processes=False)
+    client = Client(cluster)
+    sturcture_files = np.array(structure_files)
+    abinitio_energies = read_abinito(energy_files)
+
+    if method_num == -14:
+        parm_vals = xtb_read_parms()
+    else:
+        parm_labels, parm_vals = read_parms(sys.argv[1])
+        for mol in range(n_molec):
+            write_input(structure_files[mol],
+                        structures[mol],
+                        n_atoms[mol],at_num[mol],
+                        method_num, mol, charge[mol])
+    x, flag = leastsq(big_loop,parm_vals,method_num,maxfev=49,epsfcn=1e-4)#delete maxfev when done testing
     big_loop(x,method_num)
-    fvec, energies = calc_fvec(structures, weights, n_geoms, geoms, method_num)
+    fvec, energies = calc_fvec(structures, weights, n_geoms, geoms, method_num,n_atoms,at_num)
     if np.sum(n_geoms) > 0:
         print  ('FINAL RMSD ' + str(np.sqrt(np.mean(np.square(fvec[0:-np.sum(n_geoms)])))))
     else:
         print  ('FINAL RMSD  ' + str(np.sqrt(np.mean(np.square(fvec)))))
     plt.plot(energies)
-    plt.plot(abinitio_energies)
+    plt.ylim(0,0.00005)
+    plt.plot((abinitio_energies))#ev to hartree
     plt.savefig('test.png', dpi=300)
-    energies = np.array(map(ev_to_hartrees(),energies))
-for n, energy in enumerate(energies):
-    anp_int_spec(energy,n_atoms[n],at_num[n])
-
-
-#main()
+    client.close()
