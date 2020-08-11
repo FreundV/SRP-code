@@ -3,12 +3,11 @@ import numpy as np
 import os
 import matplotlib.pyplot as plt
 import sys
-import math
 import yaml
+import math
 from scipy.optimize import leastsq
 import dask.distributed
 from dask.distributed import Client,LocalCluster
-os.system("xtb -P 1")
 
 method_dict = {'PM3':-7,'AM1':-2, 'RM1':-2, 'OM1':-5, 'OM2':-6, 'OM3':-8,'ODM2':-22, 'ODM3':-23,'XTB':-14}
             
@@ -57,7 +56,7 @@ def read_input(file):
     n_parms= int(lines[0].split()[0])
     method = lines[1].split()[0]
     num_workers = 4
-    if lines[1].split()[1].isdigit() : num_workers = int(lines[1].split()[1])
+    if lines[1].split()[1].isdigit(): num_workers = int(lines[1].split()[1])
     method_num = method_dict[method.upper().replace("ORTHO", "")]
     n_molec = int(lines[2].split()[0])
     n_atoms=[]
@@ -196,21 +195,13 @@ def read_abinito(energy_files):
         energies = np.hstack((energies,((np.array(energy)-np.min(energy)))))
     return np.array(energies)
 
-def read_temp_abinito(energy_files):  
-    energies=[]
-    for file in energy_files:
-        energy = []
-        with open(file) as f:
-            data = f.readlines()
-        for line in data:
-            energy.append(float(line.split()[0]))
-        energies.append(energy)
-    return energies
-
-def calc_fvec(structures, weights, n_geoms, geoms, method, n_atom, atom_num):
-    if method == -14: #xtb method until line 16
+def calc_fvec(structures, weights, n_geoms, geoms, method, n_atom, atom_num, energy):
+    global spec_count
+    if method == -14:
         energies = []
+        new_energies = []
         fvec2 = []
+        fvec = []
         for mol in range(n_molec):
             lazy_results = []
             files = xtb_method(n_atoms[mol],charge[mol],structures[mol],structure_files[mol][0],at_num[mol])
@@ -218,29 +209,43 @@ def calc_fvec(structures, weights, n_geoms, geoms, method, n_atom, atom_num):
                 lazy_result = dask.delayed(xtb_run)(file)
                 lazy_results.append(lazy_result)
 
-            energies.append(dask.compute(*lazy_results))  # trigger computation in the background
-        for mol in range(n_molec):
-            anp_int_spec(energies[mol],n_atoms[mol],atom_num[mol])
-            spectro_one = get_Spectro()
-            anp_int_spec(read_temp_abinito(energy_files)[mol],n_atoms[mol],atom_num[mol])
-            spectro_two = get_Spectro()
-            fvec2 = spectro_one-spectro_two
+            energies = np.hstack((energies,(dask.compute(*lazy_results))))# trigger computation in the background
+            del lazy_results
+        if False: #spec_count >= 100:
+            for mol in range(n_molec):
+                if mol == 0:
+                    anp_int_spec(zero_energy(energies[:structures[mol]]),n_atoms[mol],atom_num[mol])
+                else:
+                    anp_int_spec(zero_energy(energies[structures[mol-1]:structures[mol-1]+structures[mol]]),n_atoms[mol],atom_num[mol])
+                spectro_one = get_Spectro()
+                if mol == 0:
+                    anp_int_spec(read_abinito(energy_files)[:structures[mol]],n_atoms[mol],atom_num[mol])
+                else:
+                    anp_int_spec(read_abinito(energy_files[structures[mol-1]:structures[mol-1]+structures[mol]]),n_atoms[mol],atom_num[mol])
+                spectro_two = get_Spectro()
+                fvec2 = spectro_one-spectro_two
         energies = zero_energy(energies)
-        fvec= energies-abinitio_energies
-        fvec = fvec[0]
+        fvec = np.hstack((fvec,(energies-abinitio_energies))) #627.51*349.75
+    
     else:
         fvec2 = []
         for mol in range(n_molec):
             run_mndo(mol)
         energies = read_energies(n_molec)
         fvec = (energies-abinitio_energies)*627.51*349.75
-        for mol in range(n_molec):
-            anp_int_spec(ev_to_hartree(energies[mol]),n_atoms[mol],atom_num[mol])
-            spectro_one = getSpectro()
-            anp_int_spec(read_temp_abinito(energy_files)[mol],n_atoms[mol],atom_num[mol])
-            spectro_two = get_Spectro()
-            fvec2 = spectro_one-spectro_two 
-            
+        if spec_count >= 100:
+            for mol in range(n_molec):
+                if mol == 0:
+                    anp_int_spec(ev_to_hartee(zero_energy(energies[:structures[mol]]),n_atoms[mol],atom_num[mol]))
+                else:
+                    anp_int_spec(ev_to_hartree(zero_energy(energies[structures[mol-1]:structures[mol-1]+structures[mol]]),n_atoms[mol],atom_num[mol]))
+                spectro_one = getSpectro()
+                if mol == 0:
+                    anp_int_spec(read_abinito(energy_files)[:structures[mol]],n_atoms[mol],atom_num[mol])
+                else:
+                    anp_int_spec(read_abinito(energy_files)[structures[mol-1]:structures[mol-1]+structures[mol]],n_atoms[mol],atom_num[mol])
+                spectro_two = get_Spectro()
+                fvec2 = np.hstack((fvec2,(spectro_one-spectro_two)))
     w = np.ones(np.sum(structures+n_geoms)) 
     s = 0
     for mol in range(n_molec):
@@ -261,9 +266,12 @@ def calc_fvec(structures, weights, n_geoms, geoms, method, n_atom, atom_num):
     else:
         fvec = np.hstack((fvec,comp_geoms(n_molec),fvec2))
     print  ('rmsd  ' + str(np.sqrt(np.mean(np.square(fvec)))))
-    rmsd.append(str(np.sqrt(np.mean(np.square(fvec)))))
-    fvec = fvec[:233]*w
-    return fvec, energies
+    fvec = fvec[:sum(structures)]*w
+    spec_count+=1
+    if energy: return fvec,energies
+    else: 
+        del energies
+        return fvec
 
 def read_parms(file):
     with open(file) as f_in:
@@ -286,8 +294,8 @@ def write_parms(X,method):
                 f.write(line[0]+'   '+line[1]+ ' ' +str(X[i])+'\n')
 
 def big_loop(X,method):
-    write_parms(X)  # Write the current set of parameters to fort.14
-    fvec, energies = calc_fvec(structures, weights, n_geoms, geoms, method)
+    write_parms(X,method)  # Write the current set of parameters to fort.14
+    fvec = calc_fvec(structures, weights, n_geoms, geoms, method, n_atoms, at_num, False) #,energies
     # if np.sum(n_geoms) > 0:
         # print  ('rmsd  ' + str(np.sqrt(np.mean(np.square(fvec[0:-np.sum(n_geoms)])))))
     #else:
@@ -447,7 +455,6 @@ def xtb_method(n_atoms, charge, structures, structure_file, at_nums):
     
     for mol in range(structures):
         current_file = open(os.path.join(input_path,f"{moleculeName}-coord{mol:0{padding_zeros}}.dat"),"w") 
-        # formatted strings allow for added variables in the string. 
         all_files.append(os.path.join(input_path,f"{moleculeName}-coord{mol:0{padding_zeros}}.dat"))
         
         atom_count = -1
@@ -468,7 +475,7 @@ def xtb_run(w):
     energy = 0
     output = w.split(".")[0]+'_output'
     outputName = os.path.join(os.getcwd(),output)
-    os.system(f"/share/apps/xtb-6.3.2/bin/xtb {w} > {outputName}")
+    os.system(f"/share/apps/xtb-6.3.2/bin/xtb -P 8 {w} > {outputName}")
     with open(outputName,"r") as output:
         out_lines = output.readlines()
         for line in out_lines:
@@ -495,21 +502,35 @@ def get_Spectro(spectro_file = "freq_files/Spectro.out"):
     for f,line in enumerate(lines):
         if "VIBRATIONALLY AVERAGED COORDINATES" in line:
             for r in range(bond_bend):
-                r_equil.append(float(lines[f+13+r].split()[2]))
-                r_G.append(float(lines[f+13+r].split()[3]))
-                r_alpha.append(float(lines[f+13+r].split()[4]))
+                r_equil.append(float(lines[f+13+r].split()[2]) if not "*" in lines[f+13+r].split()[2] else float(0))
+                r_G.append(float(lines[f+13+r].split()[3]) if not "*" in lines[f+13+r].split()[3] else float(0))
+                r_alpha.append(float(lines[f+13+r].split()[4]) if not "*" in lines[f+13+r].split()[4] else float(0))
         if "FUNDAMENTAL" in line:
             t=0
             while len(fundamental) < bond_bend:
                 if not len(lines[f+t].split())==0 :
-                    if lines[f+t].split()[-1][-1].isdigit():
-                        fundamental.append(float(lines[f+t].split()[-2]))
+                    if "*" in lines[f+t].split()[-2]:
+                            fundamental.append(float(0))
+                    elif lines[f+t].split()[-2][-1].isdigit():
+                            fundamental.append(float(lines[f+t].split()[-2]))
                 t+=1
-        if "BXS" in line and first:
+        if "BXS" in line and first :
             first = False
-            BXS = float(lines[f+1].split()[0])
-            BYS = float(lines[f+1].split()[1])
-            BZS = float(lines[f+1].split()[2])
+            BXS = float(lines[f+1].split()[0]) if not "*" in lines[f+1].split()[0] else float(0)
+            BYS = float(lines[f+1].split()[1]) if not "*" in lines[f+1].split()[1] else float(0)
+            BZS = float(lines[f+1].split()[2]) if not "*" in lines[f+1].split()[2] else float(0)
+    if len(r_equil) == 0:
+        for y in range(bond_bend):
+            r_equil.append(float(0))
+    if len(r_alpha) == 0:
+        for y in range(bond_bend):
+            r_alpha.append(float(0))
+    if len(r_G) == 0:
+        for y in range(bond_bend):
+            r_G.append(float(0))
+    if len(fundamental) == 0:
+        for y in range(bond_bend):
+            fundamental.append(float(0))
     result = np.hstack([r_equil,r_alpha,r_G,fundamental,BXS,BYS,BZS])
     return result
 
@@ -521,13 +542,13 @@ def xtb_write_parms(new_parms):
                             "aesdmp5","kexp","kexplight"]
     element_parms = ["lev=","exp=","GAM=","GAM3=","KCNS=","KCNP=","DPOL=","QPOL=","REPA=","REPB=","POLYS=",
                                "POLYP=","LPARP=","LPARD="]
-    with open("param_gfn2-xtb.txt","r") as parm:
+    with open("3param_gfn2-xtb.txt","r") as parm:
         parmlines = parm.readlines()
-    new_file = open("2param_gfn2-xtb.txt","w")
+    new_file = open("param_gfn2-xtb.txt","w")
     for line in parmlines[:5]:
         new_file.write(line)
     for param in global_parms:
-        new_file.write(f"{param.ljust(12)}   {float(next(parmIter)):10.6f}\n")
+        new_file.write(f"{param.ljust(12)}   {float(next(parmIter)):10.5f}\n")
     new_file.write("$end\n$pairpar\n$end\n")
     for line in parmlines[len(global_parms)+8:]:
         if line.split()[0] in element_parms:
@@ -544,7 +565,7 @@ def xtb_write_parms(new_parms):
     
 def xtb_read_parms():
     count =0
-    with open("param_gfn2-xtb.txt","r") as parm_file:
+    with open("3param_gfn2-xtb.txt","r") as parm_file:
         lines = parm_file.readlines()
     parm_list =[]
     for line in lines[5:]:
@@ -556,10 +577,15 @@ def xtb_read_parms():
                     parm_list.append(float(line.split()[2]))
     return parm_list
 
-
+def clear_dask():
+    os.chdir("dask-worker-space")
+    os.system("rm -r worker-*")
+    os.chdir("..")
 
 if __name__ == "__main__" :
     rmsd =[]
+    global spec_count
+    spec_count =0
     method_num, n_molec, n_atoms, charge, structures, energy_files, structure_files, at_num, coords, n_geoms, geoms, n_weights, weights, num_workers = read_input('main.inp')
     cluster = LocalCluster(n_workers=num_workers, threads_per_worker=1,memory_limit="1GB",processes=False)
     client = Client(cluster)
@@ -575,15 +601,16 @@ if __name__ == "__main__" :
                         structures[mol],
                         n_atoms[mol],at_num[mol],
                         method_num, mol, charge[mol])
-    x, flag = leastsq(big_loop,parm_vals,method_num,maxfev=49,epsfcn=1e-4)#delete maxfev when done testing
+    x, flag = leastsq(big_loop,parm_vals, method_num, epsfcn=1e-4)
     big_loop(x,method_num)
-    fvec, energies = calc_fvec(structures, weights, n_geoms, geoms, method_num,n_atoms,at_num)
+    fvec, energies = calc_fvec(structures, weights, n_geoms, geoms, method_num,n_atoms,at_num, True)
     if np.sum(n_geoms) > 0:
         print  ('FINAL RMSD ' + str(np.sqrt(np.mean(np.square(fvec[0:-np.sum(n_geoms)])))))
     else:
         print  ('FINAL RMSD  ' + str(np.sqrt(np.mean(np.square(fvec)))))
+    print(spec_count)
     plt.plot(energies)
-    plt.ylim(0,0.00005)
-    plt.plot((abinitio_energies))#ev to hartree
+    plt.plot(abinitio_energies)
     plt.savefig('test.png', dpi=300)
     client.close()
+    clear_dask()
