@@ -211,7 +211,7 @@ def calc_fvec(structures, weights, n_geoms, geoms, method, n_atom, atom_num, ene
 
             energies = np.hstack((energies,(dask.compute(*lazy_results))))# trigger computation in the background
             del lazy_results
-        if False: #spec_count >= 100:
+        if True: #spec_count >= 100:
             for mol in range(n_molec):
                 if mol == 0:
                     anp_int_spec(zero_energy(energies[:structures[mol]]),n_atoms[mol],atom_num[mol])
@@ -225,14 +225,14 @@ def calc_fvec(structures, weights, n_geoms, geoms, method, n_atom, atom_num, ene
                 spectro_two = get_Spectro()
                 fvec2 = spectro_one-spectro_two
         energies = zero_energy(energies)
-        fvec = np.hstack((fvec,(energies-abinitio_energies))) #627.51*349.75
+        fvec = np.hstack((fvec,hartree_to_wavenumber(energies-abinitio_energies))) #627.51*349.75
     
     else:
         fvec2 = []
         for mol in range(n_molec):
             run_mndo(mol)
         energies = read_energies(n_molec)
-        fvec = (energies-abinitio_energies)*627.51*349.75
+        fvec = hartree_to_wavenumber(energies-abinitio_energies)*627.51*349.75
         if spec_count >= 100:
             for mol in range(n_molec):
                 if mol == 0:
@@ -305,6 +305,10 @@ def big_loop(X,method):
 
 def ev_to_hartree(energies):
     new_energies = [energy/27.2114 for energy in energies]
+    return new_energies
+
+def hartree_to_wavenumber(energies):
+    new_energies = [energy *2.29371044869e17*6.62607015e-34*2.998e10 for energy in energies]
     return new_energies
 
 def zero_energy(endData):
