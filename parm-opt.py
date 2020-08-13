@@ -163,7 +163,7 @@ def xtb_geoms(n_molec):
             file.write(f"{coords[molecule][atom][0]:17.14}{coords[molecule][atom][1]:17.14}{coords[molecule][atom][2]:17.14}      {at_sym_dict[at_num[molecule][atom]]}\n")
         file.write("$end\n")
         file.close()
-        os.system("/share/apps/xtb-6.3.2/bin/xtb opt_geom.dat --opt normal")
+        os.system("/share/apps/xtb-6.3.2/bin/xtb opt_geom.dat --opt normal > /dev/null")
         with open("xtbopt.dat","r") as opt:
             optLines = opt.readlines()
         for atom in range(n_atoms[molecule]):
@@ -265,7 +265,7 @@ def calc_fvec(structures, weights, n_geoms, geoms, method, n_atom, atom_num, ene
         fvec = np.hstack((fvec,xtb_geoms(n_molec),fvec2))
     else:
         fvec = np.hstack((fvec,comp_geoms(n_molec),fvec2))
-    print  ('rmsd  ' + str(np.sqrt(np.mean(np.square(fvec)))))
+    rmsd.append('rmsd  ' + str(np.sqrt(np.mean(np.square(fvec))))+"\n")
     fvec = fvec[:sum(structures)]*w
     spec_count+=1
     if energy: return fvec,energies
@@ -447,7 +447,7 @@ def anp_int_spec(energies,n_atoms,at_num):
 def xtb_method(n_atoms, charge, structures, structure_file, at_nums):
     
     input_path = "xtb_files"
-    os.system(f"mkdir {input_path}") #making inputs folder
+    if  not os.path.isdir(input_path): os.system(f"mkdir {input_path}") #making inputs folder
     moleculeName = os.getcwd().split("/")[-2]
     all_files =[]
     
@@ -546,7 +546,7 @@ def xtb_write_parms(new_parms):
                             "aesdmp5","kexp","kexplight"]
     element_parms = ["lev=","exp=","GAM=","GAM3=","KCNS=","KCNP=","DPOL=","QPOL=","REPA=","REPB=","POLYS=",
                                "POLYP=","LPARP=","LPARD="]
-    with open("3param_gfn2-xtb.txt","r") as parm:
+    with open("initial_param_gfn2-xtb.txt","r") as parm:
         parmlines = parm.readlines()
     new_file = open("param_gfn2-xtb.txt","w")
     for line in parmlines[:5]:
@@ -569,7 +569,7 @@ def xtb_write_parms(new_parms):
     
 def xtb_read_parms():
     count =0
-    with open("3param_gfn2-xtb.txt","r") as parm_file:
+    with open("initial_param_gfn2-xtb.txt","r") as parm_file:
         lines = parm_file.readlines()
     parm_list =[]
     for line in lines[5:]:
@@ -587,10 +587,11 @@ def clear_dask():
     os.chdir("..")
 
 if __name__ == "__main__" :
-    rmsd =[]
     global spec_count
+    global rmsd 
+    rmsd = []
     spec_count =0
-    method_num, n_molec, n_atoms, charge, structures, energy_files, structure_files, at_num, coords, n_geoms, geoms, n_weights, weights, num_workers = read_input('main.inp')
+    method_num,n_molec,n_atoms,charge,structures,energy_files,structure_files,at_num,coords,n_geoms,geoms,n_weights,weights,num_workers = read_input('main.inp')
     cluster = LocalCluster(n_workers=num_workers, threads_per_worker=1,memory_limit="1GB",processes=False)
     client = Client(cluster)
     sturcture_files = np.array(structure_files)
@@ -609,12 +610,16 @@ if __name__ == "__main__" :
     big_loop(x,method_num)
     fvec, energies = calc_fvec(structures, weights, n_geoms, geoms, method_num,n_atoms,at_num, True)
     if np.sum(n_geoms) > 0:
-        print  ('FINAL RMSD ' + str(np.sqrt(np.mean(np.square(fvec[0:-np.sum(n_geoms)])))))
+        rmsd.append('FINAL RMSD ' + str(np.sqrt(np.mean(np.square(fvec[0:-np.sum(n_geoms)]))))+"\n")
     else:
-        print  ('FINAL RMSD  ' + str(np.sqrt(np.mean(np.square(fvec)))))
-    print(spec_count)
+        rmsd.append('FINAL RMSD  ' + str(np.sqrt(np.mean(np.square(fvec))))+"\n")
+    rmsd.append(f"Iterations: {spec_count}\n")
     plt.plot(energies)
     plt.plot(abinitio_energies)
     plt.savefig('test.png', dpi=300)
+    rmsd_file = open("RMSD_output","w")
+    for line in rmsd:
+        rmsd_file.write(line)
+    rmsd_file.close()
     client.close()
-    clear_dask()
+    #clear_dask()
